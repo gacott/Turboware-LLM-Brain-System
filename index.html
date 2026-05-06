@@ -1,0 +1,1122 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>untitled</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
+<style>
+body{max-width:800px;margin:40px auto;padding:0 20px;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.7;color:#1a1a2e;background:#fff}
+h1,h2,h3,h4,h5,h6{margin-top:1.4em;margin-bottom:0.6em;font-weight:600}
+h1{font-size:2em;border-bottom:2px solid #eee;padding-bottom:0.3em}
+h2{font-size:1.5em;border-bottom:1px solid #eee;padding-bottom:0.25em}
+a{color:#4263eb;text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:'Cascadia Code','Fira Code',monospace;font-size:0.88em;background:#f0f1f3;padding:2px 6px;border-radius:4px;color:#e03131}
+pre{margin:1em 0;border-radius:8px;overflow:hidden;background:#f8f9fa;border:1px solid #dee2e6}
+pre code{display:block;padding:16px 20px;background:transparent;color:#333;overflow-x:auto}
+blockquote{margin:1em 0;padding:12px 20px;border-left:4px solid #4263eb;background:#f8f9ff;border-radius:0 8px 8px 0;color:#495057}
+table{width:100%;border-collapse:collapse;margin:1em 0}
+th,td{padding:10px 14px;border:1px solid #dee2e6;text-align:left}
+thead{background:#f8f9fa}
+th{font-weight:600}
+tr:nth-child(even){background:#f9fafb}
+img{max-width:100%;border-radius:8px}
+hr{margin:2em 0;border:none;height:1px;background:#dee2e6}
+.task-list-item{list-style:none;margin-left:-1.5em}
+.task-list-item input{margin-right:8px}
+.footnotes{margin-top:2em;padding-top:1em;border-top:1px solid #dee2e6;font-size:0.9em}
+</style>
+</head>
+<body><h1>Brain — Autonomous Coding Memory Architecture</h1>
+<p>Special thanks to Guerin Green and his NovCog Brain <a href="https://novcog.dev/">https://novcog.dev/</a> for the inspration.</p>
+<h2>Overview</h2>
+<p>Brain is a continuously-learning memory system that intercepts every coding model
+request flowing through the LiteLLM gateway. It builds five kinds of memory —
+code chunks, architectural summaries, problem/solution experiences, curated
+skills, and agent personas — then retrieves relevant context on every subsequent
+request. No per-client setup. Every model sees everything the team has learned.</p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">                         ┌──────────────────────────────┐
+                         │       LiteLLM Gateway        │
+                         │     (smart-router proxy)     │
+                         └──────────┬───────────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        │                           │                           │
+        ▼                           ▼                           ▼
+   claude-use wrapper         Smart-Router               Memory Pipeline
+   (4 backends)          (complexity_router)         (5 loops, PostgreSQL)
+        │
+        ├── DeepSeek V4-Pro    (direct API)
+        ├── DeepSeek V4-Flash  (direct API)
+        ├── Kimi K2.6          (Moonshot API)
+        └── LiteLLM Gateway    (smart-router, all models)
+</code></code></pre>
+<h2>Why This Exists</h2>
+<p>Before Brain, every coding session started cold. The model knew nothing about
+our codebase, our conventions, or problems we’d already solved. We repeated
+the same debugging, re-explained the same architecture.</p>
+<p>Brain fixes this by making the gateway — the single choke point every model
+request passes through — the learning substrate. Every interaction becomes
+training data. Every solved problem becomes retrievable context. The system
+gets smarter with every request, automatically.</p>
+<p>With the persona system, Brain now also answers <em>who</em> should respond — injecting
+an agent identity (domain expert, communication style, critical rules) that
+shapes the model’s behavior for the task at hand, not just what code it should
+see.</p>
+<h2>Models</h2>
+<p>The <code>claude-use</code> wrapper (<code>~/.local/bin/claude-use</code>) routes Claude Code through
+four backends:</p>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Model</th>
+<th>Provider</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DeepSeek V4-Pro</td>
+<td>deepseek-v4-pro</td>
+<td>DeepSeek direct API</td>
+<td>Explicit “use pro” override only — multi-turn deep reasoning</td>
+</tr>
+<tr>
+<td>DeepSeek V4-Flash</td>
+<td>deepseek-v4-flash</td>
+<td>DeepSeek direct API</td>
+<td>Default for all coding tiers (SIMPLE, MEDIUM, REASONING) — both models have thinking mode, Flash handles 90%+ at <span><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>0.14</mn><mi mathvariant="normal">/</mi></mrow><annotation encoding="application/x-tex">0.14/</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">0.14/</span></span></span></span></span>0.28</td>
+</tr>
+<tr>
+<td>Kimi K2.6</td>
+<td>kimi-k2.6</td>
+<td>Moonshot API</td>
+<td>Explicit “use kimi” override only — creative/UI/websites</td>
+</tr>
+<tr>
+<td>LiteLLM Gateway</td>
+<td>smart-router</td>
+<td>Local proxy</td>
+<td>Tiered dispatch via complexity_router, all Brain context + learning</td>
+</tr>
+</tbody>
+</table>
+<h3>Smart-Router Tier Dispatch</h3>
+<p>The gateway’s complexity_router classifies every request by scoring seven
+dimensions (tokenCount, codePresence, reasoningMarkers, technicalTerms,
+simpleIndicators, multiStepPatterns, questionComplexity) against configurable
+thresholds:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Model</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIMPLE</td>
+<td>deepseek-v4-flash</td>
+<td>Score &lt; 0.10</td>
+</tr>
+<tr>
+<td>MEDIUM</td>
+<td>deepseek-v4-flash</td>
+<td>Score 0.10–0.22</td>
+</tr>
+<tr>
+<td>COMPLEX</td>
+<td>grok-4.3</td>
+<td>Score 0.22–0.42</td>
+</tr>
+<tr>
+<td>REASONING</td>
+<td>deepseek-v4-pro</td>
+<td>Score &gt; 0.42</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>complex_reasoning</code> threshold was raised from 0.28 to 0.42 because a
+single <code>reasoningMarkers</code> hit (weight 0.30) was routing everyday coding
+to Pro. Now Pro requires both reasoning language AND strong technical
+complexity — only genuinely hard multi-turn problems reach it.</p>
+<h3>Why Kimi Is Explicit-Only</h3>
+<p>Creative keyword auto-detection was removed. Keywords like “frontend”,
+“animation”, “modal”, “prototype”, “presentation”, “polish”, “beautiful”
+appear constantly in normal coding conversations — routing them to Kimi
+silently burned Moonshot quota on non-design tasks. Kimi is reserved for
+explicit “use kimi to create a web page” so the user consciously opts into
+Moonshot billing.</p>
+<h2>The Five Loops</h2>
+<h3>1. Retrieve Loop (pre-call)</h3>
+<p>Fires before every coding model request. Injects relevant memories into the
+conversation as a system message.</p>
+<p><strong>Pipeline (target: &lt;250ms warm, &lt;500ms budget):</strong></p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">User query
+  → Extract last user message + code blocks         5ms
+  → Embed via qwen3-embedding (Ollama, 4096-dim)   170ms
+  → Parallel: persona retrieval                      5ms
+            + vector search (PGVector cosine)       10ms
+            + full-text search (PostgreSQL ts_rank)   1ms
+  → Merge, dedup by entry_id, recency boost           1ms
+  → CrossEncoder rerank (ms-marco-MiniLM-L-6-v2)    50ms
+  → Trim to top-5, edge expansion for neighbors      10ms
+  → Append top-matching skills (independent search)   5ms
+  → Format as system message (~1500 tokens)           5ms
+                                                  ──────
+                                                  ~262ms
+</code></code></pre>
+<p><strong>Graceful degradation:</strong> If retrieval exceeds the 500ms timeout, the request
+proceeds without context. The reranker is skipped on the first request after
+LiteLLM restart (CrossEncoder loads from disk in ~5s cold). Errors in any stage
+never block the user.</p>
+<p><strong>Persona retrieval:</strong> Runs in parallel with code/summary/experience search.
+Uses domain-keyword-first matching: extracts domain-significant keywords from
+the user query, matches against persona <code>domain_keywords</code> arrays via PostgreSQL
+array overlap. Requires &gt;=2 keyword overlap to trust the keyword path; falls
+through to vector semantic search otherwise. Matched persona(s) are formatted
+as an identity prefix and prepended to the system message — so the model adopts
+the role of a domain expert before it sees any code context.</p>
+<p><strong>Edge expansion:</strong> After finding top results, follows <code>brain_edges</code>
+relationships to pull related context — if we retrieve <code>brain_hook.py</code>, we also
+get <code>brain_retriever.py</code> and <code>brain_formatter.py</code> because graph edges connect
+them.</p>
+<p><strong>Skill retrieval:</strong> Skills are searched independently from code — they get
+dedicated slots (configurable, default 2). This prevents denser code embeddings
+from crowding skills out of the top-15 cutoff.</p>
+<h3>2. Capture Loop (post-call)</h3>
+<p>Fire-and-forget after every successful response. Decides if the output is worth
+keeping, then stores it.</p>
+<p><strong>Capture heuristics:</strong></p>
+<ul>
+<li>Code blocks with &gt;=10 lines → stored as <code>brain_code</code> chunks</li>
+<li>Responses containing architectural insight markers (“design pattern”, “best
+practice”, “the reason is”) → stored as <code>brain_summary</code></li>
+<li>Also reads reasoning_content (thinking tokens) so reasoning-heavy models
+aren’t excluded</li>
+</ul>
+<p><strong>Access tracking:</strong> Retrieved entries have <code>access_count</code> incremented and
+<code>last_accessed_at</code> updated. This feeds recency boosts in future retrievals.</p>
+<h3>3. Learn Loop (post-call)</h3>
+<p>Detects problem-solving patterns. When a query contains markers like “error”,
+“bug”, “fix”, “why does”, “how do I fix”, and the response is substantive, the
+interaction is stored as a <code>brain_experience</code> entry — problem, solution, and
+outcome. These are retrievable when similar problems arise.</p>
+<h3>4. Skills Loop (batch ingestion)</h3>
+<p>Curated instructional modules from trusted repositories, ingested via
+<code>brain_cli.py skill-ingest</code>. Each skill is a <a href="http://SKILL.md">SKILL.md</a> file with YAML frontmatter
+(name, description) and a markdown body. Skills are embedded, stored in
+<code>brain_skills</code>, and retrieved alongside code/summary/experience memories.</p>
+<p><strong>Skill sources (24 skills from 6 repos):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Repository</th>
+<th>Skills</th>
+<th>Focus</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mattpocock/skills</td>
+<td>diagnose, improve-codebase-architecture, grill-with-docs, zoom-out</td>
+<td>Engineering methodology</td>
+</tr>
+<tr>
+<td>affaan-m/everything-claude-code</td>
+<td>mcp-server-patterns, postgres-patterns, api-design, deployment-patterns, cost-aware-llm-pipeline, python-patterns, docker-patterns, security-review</td>
+<td>System architecture</td>
+</tr>
+<tr>
+<td>anthropics/skills</td>
+<td>docx, pdf, pptx, xlsx</td>
+<td>Document generation</td>
+</tr>
+<tr>
+<td>obra/superpowers</td>
+<td>finishing-a-development-branch, systematic-debugging, using-git-worktrees, subagent-driven-development, test-driven-development, brainstorming</td>
+<td>Development workflow</td>
+</tr>
+<tr>
+<td>yvgude/lean-ctx</td>
+<td>lean-ctx</td>
+<td>Context management</td>
+</tr>
+<tr>
+<td>forrestchang/andrej-karpathy-skills</td>
+<td>karpathy-guidelines</td>
+<td>Behavioral guardrails — think first, simplicity, surgical edits, goal-driven</td>
+</tr>
+</tbody>
+</table>
+<h3>5. Persona Loop (batch ingestion + runtime retrieval)</h3>
+<p>Agent personas from <a href="https://github.com/msitarzewski/agency-agents">msitarzewski/agency-agents</a>
+— 183 pre-written expert identities spanning 15 domains. Each persona is a
+markdown file with YAML frontmatter (name, description, emoji, vibe) and
+structured body sections (Identity &amp; Memory, Critical Rules, Communication
+Style, Core Capabilities, etc.).</p>
+<p><strong>How personas differ from skills:</strong> Skills describe <em>how</em> to do something
+(methodology, patterns, checklists). Personas describe <em>who</em> is doing it —
+identity, professional stance, rules, and communication style. A skill
+says “follow this debugging checklist.” A persona says “you are a senior SRE
+who thinks in blast radius, error budgets, and root cause.”</p>
+<p><strong>Domain divisions (15):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Division</th>
+<th>Count</th>
+<th>Example Personas</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>engineering</td>
+<td>28</td>
+<td>Senior Developer, Software Architect, Security Engineer, SRE</td>
+</tr>
+<tr>
+<td>marketing</td>
+<td>28</td>
+<td>Content Creator, SEO Specialist, Social Media Strategist</td>
+</tr>
+<tr>
+<td>specialized</td>
+<td>40</td>
+<td>Chief of Staff, Compliance Auditor, MCP Builder</td>
+</tr>
+<tr>
+<td>game-development</td>
+<td>19</td>
+<td>Game Designer, Level Designer, Unity Architect</td>
+</tr>
+<tr>
+<td>design</td>
+<td>8</td>
+<td>Brand Guardian, UX Architect, UI Designer</td>
+</tr>
+<tr>
+<td>sales</td>
+<td>8</td>
+<td>Sales Engineer, Deal Strategist, Pipeline Analyst</td>
+</tr>
+<tr>
+<td>paid-media</td>
+<td>7</td>
+<td>Paid Media Auditor, PPC Campaign Strategist</td>
+</tr>
+<tr>
+<td>testing</td>
+<td>8</td>
+<td>Accessibility Auditor, API Tester, Performance Benchmarker</td>
+</tr>
+<tr>
+<td>finance</td>
+<td>5</td>
+<td>Financial Analyst, Investment Researcher, Tax Strategist</td>
+</tr>
+<tr>
+<td>academic</td>
+<td>5</td>
+<td>Anthropologist, Historian, Psychologist</td>
+</tr>
+<tr>
+<td>product</td>
+<td>5</td>
+<td>Product Manager, Trend Researcher, Behavioral Nudge Engine</td>
+</tr>
+<tr>
+<td>project-management</td>
+<td>6</td>
+<td>Senior Project Manager, Studio Producer, Jira Workflow Steward</td>
+</tr>
+<tr>
+<td>support</td>
+<td>6</td>
+<td>Support Responder, Infrastructure Maintainer</td>
+</tr>
+<tr>
+<td>spatial-computing</td>
+<td>6</td>
+<td>visionOS Spatial Engineer, XR Immersive Developer</td>
+</tr>
+<tr>
+<td>strategy</td>
+<td>4</td>
+<td>Strategy playbooks and coordination</td>
+</tr>
+</tbody>
+</table>
+<p>Sub-domains for game engines (blender, godot, unity, unreal-engine,
+roblox-studio) are treated as distinct divisions for finer-grained matching.</p>
+<p><strong>Runtime retrieval:</strong></p>
+<ol>
+<li>Extract domain-significant keywords from user query (filtering stop words)</li>
+<li>Match against persona <code>domain_keywords</code> via PostgreSQL <code>&amp;&amp;</code> overlap</li>
+<li>If best match has &gt;=2 keyword overlap, use keyword results</li>
+<li>Otherwise, fall through to vector semantic search</li>
+<li>Format top 1-2 personas as system identity prefix (~600 token budget)</li>
+<li>Prepend to conversation BEFORE code context (persona first, then code,
+then skills)</li>
+</ol>
+<h2>Memory Tables</h2>
+<p>All in PostgreSQL with the pgvector extension.</p>
+<h3>brain_code</h3>
+<p>Code chunks at function/class granularity.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>repo_path</code></td>
+<td>Which codebase this belongs to</td>
+</tr>
+<tr>
+<td><code>file_path</code></td>
+<td>Source file relative to repo root</td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td>Python, TypeScript, Go, Rust, etc.</td>
+</tr>
+<tr>
+<td><code>symbol_name</code></td>
+<td>Function or class name</td>
+</tr>
+<tr>
+<td><code>symbol_type</code></td>
+<td>function, class, struct, interface, etc.</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>The actual source code</td>
+</tr>
+<tr>
+<td><code>summary</code></td>
+<td>One-line heuristic description</td>
+</tr>
+<tr>
+<td><code>embedding</code></td>
+<td>4096-dim vector via qwen3-embedding</td>
+</tr>
+</tbody>
+</table>
+<h3>brain_summary</h3>
+<p>Architectural notes, design rationale, conventions.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code></td>
+<td>One-line topic</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>The insight or convention</td>
+</tr>
+<tr>
+<td><code>keywords</code></td>
+<td>Extracted for FTS matching</td>
+</tr>
+<tr>
+<td><code>embedding</code></td>
+<td>4096-dim vector</td>
+</tr>
+</tbody>
+</table>
+<h3>brain_experience</h3>
+<p>Problems encountered and how they were solved.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>context_type</code></td>
+<td>bug, error, architecture, performance, etc.</td>
+</tr>
+<tr>
+<td><code>problem</code></td>
+<td>What went wrong or what was needed</td>
+</tr>
+<tr>
+<td><code>solution</code></td>
+<td>What fixed it</td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td>Did it work? What was learned?</td>
+</tr>
+<tr>
+<td><code>embedding</code></td>
+<td>4096-dim vector</td>
+</tr>
+</tbody>
+</table>
+<h3>brain_skills</h3>
+<p>Curated instructional modules — methodology, patterns, workflows.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>Unique skill identifier</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>One-line summary for semantic matching</td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>Full markdown instruction set</td>
+</tr>
+<tr>
+<td><code>source_repo</code></td>
+<td>Origin repository</td>
+</tr>
+<tr>
+<td><code>source_url</code></td>
+<td>Raw URL fetched from</td>
+</tr>
+<tr>
+<td><code>embedding</code></td>
+<td>4096-dim vector (name + description)</td>
+</tr>
+</tbody>
+</table>
+<h3>brain_personas</h3>
+<p>Agent identities for system prompt injection — domain expertise, professional
+stance, and behavioral rules.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>Unique persona identifier (“Security Engineer”)</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>One-line role summary</td>
+</tr>
+<tr>
+<td><code>division</code></td>
+<td>Domain category (engineering, marketing, product, etc.)</td>
+</tr>
+<tr>
+<td><code>identity</code></td>
+<td>Who-am-I section — role, personality, experience</td>
+</tr>
+<tr>
+<td><code>critical_rules</code></td>
+<td>Non-negotiable behavioral constraints</td>
+</tr>
+<tr>
+<td><code>communication_style</code></td>
+<td>Tone, framing, and interaction patterns</td>
+</tr>
+<tr>
+<td><code>full_body</code></td>
+<td>Complete source markdown</td>
+</tr>
+<tr>
+<td><code>domain_keywords</code></td>
+<td>TEXT[] — extracted keywords for overlap matching</td>
+</tr>
+<tr>
+<td><code>embedding</code></td>
+<td>4096-dim vector (name + description + identity)</td>
+</tr>
+</tbody>
+</table>
+<p>Key design: <code>domain_keywords</code> uses PostgreSQL’s GIN array index with the <code>&amp;&amp;</code>
+(overlap) operator for sub-millisecond keyword matching. This is faster than
+vector search and handles exact terminology matches that embeddings might miss.</p>
+<h3>brain_edges</h3>
+<p>Directed relationships between memories — who calls whom, what depends on what.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_entry_id</code></td>
+<td>Origin of the relationship</td>
+</tr>
+<tr>
+<td><code>target_entry_id</code></td>
+<td>Destination</td>
+</tr>
+<tr>
+<td><code>relation_type</code></td>
+<td>contains, calls, imports, rationale_for, etc.</td>
+</tr>
+<tr>
+<td><code>confidence</code></td>
+<td>0.0-1.0, EXTRACTED vs INFERRED</td>
+</tr>
+</tbody>
+</table>
+<h2>Ingestion Paths</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Source</th>
+<th>Method</th>
+<th>Granularity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Graphify (AST)</td>
+<td>Local repositories</td>
+<td>Tree-sitter parsing (25 languages) via graphify tool</td>
+<td>Per-symbol: functions, classes, edges</td>
+</tr>
+<tr>
+<td>Session Capture</td>
+<td>Model responses (automatic)</td>
+<td>Post-call heuristics: code blocks &gt;=10 lines, architectural markers</td>
+<td>Per-response: code, summaries, experiences</td>
+</tr>
+<tr>
+<td>Skill Ingestion</td>
+<td>GitHub <a href="http://SKILL.md">SKILL.md</a> repos (6)</td>
+<td>YAML frontmatter parsing + embedding</td>
+<td>Per-skill: methodology modules</td>
+</tr>
+<tr>
+<td>Persona Ingestion</td>
+<td>agency-agents repo (183 personas)</td>
+<td>YAML frontmatter + section extraction + embedding</td>
+<td>Per-persona: identity, rules, style</td>
+</tr>
+</tbody>
+</table>
+<h3>Path Details</h3>
+<h3>Path A: Graphify (AST-quality, bulk)</h3>
+<p><code>brain_graphify.py</code> runs the <a href="https://github.com/safishamsi/graphify">Graphify</a>
+tool, which uses tree-sitter to parse 25 languages into a knowledge graph
+(208 nodes, 316 edges for the gateway codebase). Brain then:</p>
+<ol>
+<li>Extracts code at AST boundaries (function/class bodies, not regex)</li>
+<li>Stores design rationale from docstrings as <code>brain_summary</code></li>
+<li>Stores <code>contains</code>, <code>calls</code>, and <code>rationale_for</code> edges in <code>brain_edges</code></li>
+</ol>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">brain_cli.py graphify /path/to/repo
+</code></code></pre>
+<h3>Path B: Session Capture (continuous, automatic)</h3>
+<p>Every response from a coding model through the gateway is evaluated by
+<code>brain_ingest.capture_if_valuable()</code>. Code blocks are chunked and stored.
+Architectural insights are extracted and stored. This happens automatically —
+no manual ingestion needed.</p>
+<h3>Path C: Skill Ingestion (curated, batch)</h3>
+<p>Skills are ingested from GitHub repositories via <code>brain_cli.py skill-ingest</code>.
+Each skill is a <a href="http://SKILL.md">SKILL.md</a> file fetched from a raw URL, parsed for YAML
+frontmatter, embedded, and stored in <code>brain_skills</code>. Skills are versioned
+— re-running the ingest updates existing skills in place.</p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">brain_cli.py skill-ingest
+</code></code></pre>
+<h3>Path D: Persona Ingestion (curated, batch)</h3>
+<p>Personas are ingested from <code>msitarzewski/agency-agents</code> via <code>brain_cli.py persona-ingest</code>. The ingester fetches the repo tree from GitHub’s API, then
+fetches, parses, embeds, and stores each <code>.md</code> agent file. Personas are
+versioned like skills — re-running the ingest updates existing personas in
+place via ON CONFLICT DO UPDATE.</p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">brain_cli.py persona-ingest
+</code></code></pre>
+<h2>Search Architecture</h2>
+<p>Hybrid search combining four strategies:</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Engine</th>
+<th>Latency</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vector (semantic)</td>
+<td>PGVector cosine distance, 4096-dim</td>
+<td>~10ms</td>
+<td>Finds conceptually similar code/patterns</td>
+</tr>
+<tr>
+<td>Full-text (keyword)</td>
+<td>PostgreSQL <code>ts_rank</code> on <code>to_tsvector</code></td>
+<td>~1ms</td>
+<td>Catches exact symbol names and error messages</td>
+</tr>
+<tr>
+<td>Persona domain-keyword</td>
+<td>PostgreSQL <code>&amp;&amp;</code> array overlap with GIN index</td>
+<td>&lt;1ms</td>
+<td>Exact terminology match for persona retrieval</td>
+</tr>
+<tr>
+<td>CrossEncoder rerank</td>
+<td>ms-marco-MiniLM-L-6-v2 (CPU)</td>
+<td>~50ms</td>
+<td>Fine-grained relevance scoring on top 15 candidates</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Vector search (semantic):</strong> Query → embedding → cosine distance against all
+tables in parallel → top-10 per table with table-specific weights
+(brain_code 1.0, brain_summary 0.9, brain_experience 0.8). Skills are searched
+independently with their own top-k to prevent denser code embeddings from
+crowding them out.</p>
+<p><strong>Full-text search (keyword):</strong> Query → PostgreSQL <code>plainto_tsquery</code> with
+<code>ts_rank</code> scoring → exact keyword matches. Weights lower than vector (0.6) but
+catches exact symbol names and error messages that vectors miss.</p>
+<p><strong>Persona domain-keyword search (array overlap):</strong> Query → extract domain
+keywords → PostgreSQL <code>&amp;&amp;</code> (array overlap) against <code>domain_keywords</code> column with
+GIN index → ordered by overlap count. Sub-millisecond. Falls through to vector
+search if best overlap &lt; 2 keywords. Only searched for persona retrieval, not
+code/summary/experience.</p>
+<p><strong>Merge + rerank:</strong> Results deduplicated by <code>entry_id</code>, vector results preferred
+over FTS (higher weight). Top 15 candidates passed through a CrossEncoder
+(ms-marco-MiniLM-L-6-v2) for fine-grained relevance scoring. Final top-5
+injected as context. Skills appended in dedicated slots after reranking.
+Persona identity prepended before everything.</p>
+<h2>Infrastructure</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Details</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LiteLLM Gateway</td>
+<td>Team proxy with smart-router, all model traffic</td>
+</tr>
+<tr>
+<td>PostgreSQL + PGVector</td>
+<td>Brain memory tables (6) + LiteLLM metadata. GIN indexes on FTS, B-tree on recency, GIN on domain_keywords</td>
+</tr>
+<tr>
+<td>qwen3-embedding (Ollama)</td>
+<td>4096-dim, CPU, keep-alive 24h. LRU cache (100 entries) on query embeddings</td>
+</tr>
+<tr>
+<td>CrossEncoder reranker</td>
+<td>ms-marco-MiniLM-L-6-v2, in-process. Background thread warm on startup</td>
+</tr>
+<tr>
+<td>graphify (tree-sitter)</td>
+<td>25 language grammars. AST-quality chunking for bulk ingestion</td>
+</tr>
+<tr>
+<td>Local models (llama.cpp)</td>
+<td>Qwen3-Coder-Next (80B-A3B), Gemma-4-31B. Free GPU inference</td>
+</tr>
+</tbody>
+</table>
+<h3>Embedding</h3>
+<p><code>brain_embedder.py</code> wraps Ollama’s HTTP API for <code>qwen3-embedding:latest</code>
+(4096-dim). Async via <code>httpx.AsyncClient</code> with persistent connections. LRU
+cache (100 entries) on query embeddings — identical queries skip the Ollama
+round-trip. Batch embedding for ingestion (up to 2000 chars per chunk).</p>
+<h3>Database</h3>
+<p>PGVector extension on the same PostgreSQL instance the gateway uses. Connection
+pooling via <code>asyncpg</code> (5-15 connections). Recursive CTE for graph traversal
+(<code>get_neighbors</code> with <code>max_depth</code>).</p>
+<h2>How It All Fits Together</h2>
+<p>A developer using Claude Code types: “I need to refactor the auth middleware
+to support JWT rotation.”</p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">┌─ Client ─────────────────────────────────────────────────────────┐
+│ "refactor auth middleware to support JWT rotation"               │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌─ Smart-Router ───────────────────────────────────────────────────┐
+│ Classifies: COMPLEX (refactor, middleware, auth, rotation)       │
+│ Routes to: grok-4.3                                              │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌─ Brain Retrieve ─────────────────────────────────────────────────┐
+│ Persona: extracts keywords (refactor, auth, middleware, jwt...)  │
+│   → keyword match: Security Engineer (engineering, overlap &gt;=2)  │
+│   → injected as identity prefix                                  │
+│                                                                  │
+│ Vector search finds: auth_middleware.py (brain_code),            │
+│ JWT session patterns (brain_summary),                            │
+│ "JWT refresh token race condition" (brain_experience)            │
+│                                                                  │
+│ Edge expansion pulls: token_store.py, session_manager.py         │
+│                                                                  │
+│ Skill search finds: security-review, api-design                  │
+│                                                                  │
+│ All injected as system message before the model sees the query.  │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌─ Model ──────────────────────────────────────────────────────────┐
+│ Sees: [You are Security Engineer...] + [System Context] + query  │
+│ - Adopts security engineering stance and methodology             │
+│ - The actual auth middleware code                                │
+│ - The JWT session patterns we already documented                 │
+│ - The race condition bug we previously fixed                     │
+│ - The security-review and api-design skill methodologies         │
+│                                                                  │
+│ Generates a solution informed by security expertise, our code,   │
+│ our conventions, our past mistakes, and established patterns.    │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌─ Brain Capture ──────────────────────────────────────────────────┐
+│ Response contains new code → stored as brain_code chunks         │
+│ Architectural insight about JWT rotation → stored as summary     │
+│ Problem/solution pattern → stored as experience                  │
+│                                                                  │
+│ Next developer to touch auth gets ALL of this context for free.  │
+└──────────────────────────────────────────────────────────────────┘
+</code></code></pre>
+<p>The developer didn’t invoke any skills. They didn’t search the codebase. They
+didn’t read past PRs or bug reports. They just asked a question, and Brain
+assembled everything — the expert identity, the code, the architecture, the
+experience, and the methodology — and presented it to the model.</p>
+<h2>Performance</h2>
+<p><strong>Steady-state retrieval:</strong> ~260ms (embed 170ms + persona 5ms + search 11ms +
+rerank 50ms + overhead). Well within the 500ms budget. Persona retrieval adds
+&lt;5ms (keyword match &lt;1ms, vector fallback &lt;5ms, format &lt;1ms).</p>
+<p><strong>Cold start:</strong> First request after gateway restart pays ~5s for CrossEncoder
+loading (background thread) and ~14s if the embedding model was evicted from
+Ollama memory. Both gracefully degrade — the request proceeds without context
+rather than blocking.</p>
+<p><strong>Current state (2026-05-06):</strong> 461 code chunks, 403 summaries, 0 experiences,
+24 skills from 6 repos, 183 personas from 1 repo, 351 graph edges. Growing with
+every coding request.</p>
+<h2>Key Design Decisions</h2>
+<ol>
+<li>
+<p><strong>Hook-based, not API-based.</strong> Brain lives inside the gateway as a hook, not
+as a separate service. No network hop, no additional latency, no extra
+process to manage.</p>
+</li>
+<li>
+<p><strong>PGVector, not LanceDB or Pinecone.</strong> Same PostgreSQL instance the gateway
+already uses. Native FTS via <code>tsvector</code>. No additional infrastructure.</p>
+</li>
+<li>
+<p><strong>Fire-and-forget post-call.</strong> <code>asyncio.create_task()</code> launches capture and
+learning in the background. The user never waits for storage.</p>
+</li>
+<li>
+<p><strong>Graceful degradation everywhere.</strong> Any error in retrieval, capture, or
+learning is caught silently. Brain can fail completely and no request is
+blocked.</p>
+</li>
+<li>
+<p><strong>AST chunking via Graphify, not regex.</strong> Tree-sitter properly handles nested
+classes, closures, async functions, decorators across 25 languages. Regex
+was a pragmatic first step; Graphify replaced it.</p>
+</li>
+<li>
+<p><strong>Edge-weighted retrieval.</strong> Graph relationships (contains, calls, imports)
+complement vector similarity. Pure vector search finds “similar code”; edges
+find “connected code.”</p>
+</li>
+<li>
+<p><strong>Team-wide, not per-user.</strong> Brain is a centralized gateway — everyone
+benefits from everyone else’s sessions. No local state, no sync needed.</p>
+</li>
+<li>
+<p><strong>Skills as independent retrieval target.</strong> Skills aren’t lumped into the
+unified vector search where they’d be crowded out by denser code embeddings.
+They get their own vector search, their own top-k, and dedicated slots in the
+formatted context.</p>
+</li>
+<li>
+<p><strong>Tiered model routing with gated Pro.</strong> Flash handles SIMPLE, MEDIUM, and
+REASONING (both models have thinking mode — chain-of-thought with
+reasoning_content). Grok handles COMPLEX (architecture, refactors). Pro is
+gated behind a high <code>complex_reasoning</code> threshold (0.42) so only requests
+with BOTH reasoning language AND strong technical complexity reach it.
+Explicit “use pro” bypasses the gate. Every tier gets brain context. Every
+tier learns.</p>
+</li>
+<li>
+<p><strong>Explicit model overrides only — no automatic detection.</strong> The
+router_classifier hook intercepts requests before the complexity router
+to handle natural-language model overrides (“use kimi to create a web
+page”, “use pro”). Creative keyword auto-detection was removed: keywords
+like “frontend”, “animation”, “modal”, “prototype”, “polish” appeared
+constantly in normal coding conversations, silently burning Moonshot
+quota. Now Kimi and Pro are opt-in — the user consciously chooses them.</p>
+</li>
+<li>
+<p><strong>Never cripple model capability.</strong> When a model supports thinking/reasoning,
+tool calling, or vision, those capabilities must survive the round-trip
+through the gateway intact. If a translation path drops reasoning content,
+discards tool arguments, or strips thinking blocks, the fix goes in the
+translation layer — not by disabling the capability on the model side.</p>
+</li>
+<li>
+<p><strong>Persona as identity prefix, not context block.</strong> Personas aren’t mixed into
+the code/search context. They’re prepended as a system identity (“You are X,
+operating in the Y domain”) before any code or skills. This shapes the
+model’s professional stance BEFORE it reads the task — so it approaches the
+work as a domain expert, not as a generic assistant that happens to have
+seen relevant code.</p>
+</li>
+<li>
+<p><strong>Domain-keyword-first with semantic fallback.</strong> Persona matching uses
+PostgreSQL array overlap (<code>&amp;&amp;</code> operator with GIN index) on extracted domain
+keywords. This is sub-millisecond and handles exact terminology matches
+(“game level design” → Game Designer, Level Designer). When the keyword
+signal is weak (&lt;2 overlap), the system falls through to vector semantic
+search. The threshold prevents false matches from coincidental single-word
+overlaps.</p>
+</li>
+</ol>
+<h2>Recreating This System</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li><strong>PostgreSQL 15+</strong> with the <a href="https://github.com/pgvector/pgvector">pgvector</a> extension</li>
+<li><strong>Python 3.11+</strong> virtual environment</li>
+<li><strong>Ollama</strong> with <code>qwen3-embedding:latest</code> pulled</li>
+<li><strong>LiteLLM</strong> proxy installed and running</li>
+<li><strong>git</strong> and <strong>tree-sitter</strong> grammars (for graphify AST chunking)</li>
+</ul>
+<h3>1. Database</h3>
+<pre><code class="language-sql"><span class="code-lang">sql</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+</code></code></pre>
+<p>The schema is self-managing — <code>brain_db.py</code> creates all six tables on first
+start via <code>init_schema()</code>. Set the connection string:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">export DATABASE_URL="postgresql://user:pass@localhost:5432/litellm"
+</code></code></pre>
+<h3>2. Embedding Model</h3>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">ollama pull qwen3-embedding:latest
+# Keep the model warm — avoids ~14s cold-start on first retrieval:
+export OLLAMA_KEEP_ALIVE=24h
+</code></code></pre>
+<h3>3. Python Dependencies</h3>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">pip install asyncpg httpx sentence-transformers pyyaml
+</code></code></pre>
+<p>sentence-transformers provides the CrossEncoder reranker
+(<code>cross-encoder/ms-marco-MiniLM-L-6-v2</code>). It loads lazily in a background
+thread — the first request skips reranking rather than blocking.</p>
+<h3>4. Brain Files</h3>
+<p>All brain modules live alongside the LiteLLM config. Copy these files into
+your LiteLLM directory:</p>
+<pre><code><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">brain_config.py          # All settings via env vars
+brain_db.py              # PGVector schema, CRUD, hybrid search
+brain_embedder.py        # Ollama embedding API wrapper
+brain_retriever.py       # Multi-stage retrieval pipeline
+brain_formatter.py       # System message formatting
+brain_hook.py            # LiteLLM CustomLogger (pre-call + post-call)
+brain_ingest.py          # Session capture heuristics
+brain_learn.py           # Problem/solution pattern detection
+brain_graphify.py        # Tree-sitter AST ingestion wrapper
+brain_skill_ingester.py  # SKILL.md fetcher/parser from GitHub
+brain_persona_ingester.py # Agency agent persona fetcher/parser
+brain_cli.py             # CLI: graphify, skill-ingest, persona-ingest, etc.
+router_classifier.py     # Model override hook ("use kimi", "use pro")
+cf_streaming_middleware.py # SSE heartbeat prevents Cloudflare 524 timeouts
+</code></code></pre>
+<h3>5. LiteLLM Callback Wiring</h3>
+<p>In your <code>config.yaml</code>:</p>
+<pre><code class="language-yaml"><span class="code-lang">yaml</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">litellm_settings:
+  callbacks:
+    - router_classifier.proxy_handler_instance
+    - brain_hook.proxy_handler_instance
+</code></code></pre>
+<p>The <code>router_classifier</code> must run first — it handles explicit model overrides
+(“use kimi”, “use pro”) before the complexity router dispatches.</p>
+<h3>6. Smart-Router Configuration</h3>
+<p>Add to <code>config.yaml</code> under <code>model_list</code>:</p>
+<pre><code class="language-yaml"><span class="code-lang">yaml</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">- model_name: smart-router
+  litellm_params:
+    model: auto_router/complexity_router
+    complexity_router_config:
+      tiers:
+        SIMPLE: deepseek-v4-flash
+        MEDIUM: deepseek-v4-flash
+        COMPLEX: grok-4.3
+        REASONING: deepseek-v4-pro
+      dimension_weights:
+        tokenCount: 0.10
+        codePresence: 0.20
+        reasoningMarkers: 0.30
+        technicalTerms: 0.25
+        simpleIndicators: 0.05
+        multiStepPatterns: 0.03
+        questionComplexity: 0.02
+      tier_boundaries:
+        simple_medium: 0.10
+        medium_complex: 0.22
+        complex_reasoning: 0.42   # Pro gated behind this
+      technical_keywords:
+        - "architecture"
+        - "distributed"
+        - "scalable"
+        - "refactor"
+        - "migration"
+        # ... (see full list in config)
+      reasoning_keywords:
+        - "step by step"
+        - "think through"
+        - "prove"
+        - "theorem"
+        # ... (see full list in config)
+    complexity_router_default_model: deepseek-v4-flash
+</code></code></pre>
+<p>The <code>complex_reasoning</code> boundary at 0.42 is critical: <code>reasoningMarkers</code> alone
+(weight 0.30) cannot reach Pro. The request needs BOTH reasoning language AND
+strong technical complexity.</p>
+<h3>7. Persona Ingestion</h3>
+<p>Fetches 183 agent personas from
+<a href="https://github.com/msitarzewski/agency-agents">msitarzewski/agency-agents</a>:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">python brain_cli.py persona-ingest
+</code></code></pre>
+<p>This clones the repo tree via the GitHub API, then fetches, parses, embeds,
+and stores each <code>.md</code> agent file. Personas are versioned — re-running updates
+existing ones in place.</p>
+<p>Verify:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">python brain_cli.py persona-list
+</code></code></pre>
+<h3>8. Skill Ingestion</h3>
+<p>Fetches 24 <a href="http://SKILL.md">SKILL.md</a> files from 6 repositories:</p>
+<table>
+<thead>
+<tr>
+<th>Repository</th>
+<th>Skills</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/mattpocock/skills">mattpocock/skills</a></td>
+<td>diagnose, improve-codebase-architecture, grill-with-docs, zoom-out</td>
+</tr>
+<tr>
+<td><a href="https://github.com/affaan-m/everything-claude-code">affaan-m/everything-claude-code</a></td>
+<td>mcp-server-patterns, postgres-patterns, api-design, deployment-patterns, cost-aware-llm-pipeline, python-patterns, docker-patterns, security-review</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/skills">anthropics/skills</a></td>
+<td>docx, pdf, pptx, xlsx</td>
+</tr>
+<tr>
+<td><a href="https://github.com/obra/superpowers">obra/superpowers</a></td>
+<td>finishing-a-development-branch, systematic-debugging, using-git-worktrees, subagent-driven-development, test-driven-development, brainstorming</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yvgude/lean-ctx">yvgude/lean-ctx</a></td>
+<td>lean-ctx</td>
+</tr>
+<tr>
+<td><a href="https://github.com/forrestchang/andrej-karpathy-skills">forrestchang/andrej-karpathy-skills</a></td>
+<td>karpathy-guidelines</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">python brain_cli.py skill-ingest
+</code></code></pre>
+<p>Verify:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">python brain_cli.py skill-list
+</code></code></pre>
+<h3>9. Code Ingestion (Graphify)</h3>
+<p>Parses a repository into AST-quality chunks using tree-sitter (25 languages)
+via the <a href="https://github.com/safishamsi/graphify">Graphify</a> tool:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">python brain_cli.py graphify /path/to/repo
+</code></code></pre>
+<p>This extracts functions, classes, methods at AST boundaries and stores
+<code>contains</code>, <code>calls</code>, and <code>rationale_for</code> edges in <code>brain_edges</code>.</p>
+<h3>10. Verification</h3>
+<p>After setup, start LiteLLM and check the logs:</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">systemctl restart litellm
+journalctl -u litellm -f | grep -E 'brain|router_classifier'
+</code></code></pre>
+<p>You should see the reranker loading in the background (first request skips
+reranking), persona and context retrieval firing on each coding request, and
+capture/learn running fire-and-forget after each response.</p>
+<p>Cold-start timeline:</p>
+<ul>
+<li>Reranker loads in background thread (~5s) — requests proceed without reranking until ready</li>
+<li>Embedding model pulls from Ollama (~14s if evicted) — requests proceed without context</li>
+<li>PostgreSQL schema auto-creates on first brain hook initialization</li>
+</ul>
+<h3>11. Cloudflare Tunnel (cloudflared)</h3>
+<p>The gateway is exposed publicly through a Cloudflare Tunnel, which proxies
+traffic from a public hostname to <code>localhost:4000</code> without opening firewall
+ports. This also provides DDoS protection and free TLS termination.</p>
+<p><strong>Install and authenticate:</strong></p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs"># Install cloudflared
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update &amp;&amp; sudo apt install cloudflared
+
+# Authenticate (opens browser — or use a token from the Cloudflare dashboard)
+cloudflared tunnel login
+cloudflared tunnel create &lt;tunnel-name&gt;
+</code></code></pre>
+<p><strong>Configure</strong> (<code>/etc/cloudflared/config.yml</code>):</p>
+<pre><code class="language-yaml"><span class="code-lang">yaml</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">tunnel: &lt;tunnel-id&gt;
+credentials-file: /etc/cloudflared/&lt;tunnel-id&gt;.json
+
+ingress:
+  - hostname: &lt;your-public-hostname&gt;
+    service: http://localhost:4000
+    originRequest:
+      connectTimeout: 30s
+      disableChunkedEncoding: false
+  - service: http_status:404
+</code></code></pre>
+<p><strong>DNS:</strong> Create a CNAME record in Cloudflare DNS pointing
+<code>&lt;your-public-hostname&gt;</code> to <code>&lt;tunnel-id&gt;.cfargotunnel.com</code>.</p>
+<pre><code class="language-bash"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">sudo systemctl enable --now cloudflared
+</code></code></pre>
+<h3>12. Streaming Heartbeat Middleware (CF 524 Fix)</h3>
+<p>DeepSeek V4-Pro and other reasoning models can spend &gt;100s in their thinking
+phase before emitting the first token. Cloudflare’s proxy has a hard 100-second
+read timeout — if no bytes flow, it terminates with a <strong>524 error</strong>.</p>
+<p>The <code>cf_streaming_middleware.py</code> ASGI middleware fixes this by injecting SSE
+heartbeat comments (<code>: heartbeat\n\n</code>) every 20 seconds during silent periods
+in streaming responses. SSE parsers ignore comment lines (they start with <code>:</code>).</p>
+<p><strong>Mount the middleware</strong> in your LiteLLM startup script (before uvicorn):</p>
+<pre><code class="language-python"><span class="code-lang">python</span><button class="copy-btn" onclick="copyCode(this)">Copy</button><code class="hljs">from cf_streaming_middleware import CFStreamingMiddleware
+app.add_middleware(CFStreamingMiddleware)
+</code></code></pre>
+<p>It only intercepts POST requests to streaming paths (<code>/v1/chat/completions</code>,
+<code>/v1/messages</code>). All other traffic passes through at wire speed with zero
+overhead — one lock acquire/release per response chunk, no request body
+inspection.</p>
+</body>
+</html>
