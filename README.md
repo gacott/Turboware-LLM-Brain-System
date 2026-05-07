@@ -2,7 +2,6 @@
 
 Special thanks to Guerin Green (https://www.facebook.com/guerin.green) and his NovCog Brain https://novcog.dev/ for the inspiration.
 
-## Overview
 This is the system we are using at Turboware for Everything. All employees, no matter
 their job description, development, management, social media, etc, are using this system
 for AI-based access and work. It applies to and works flawlessly for all of their jobs.
@@ -21,7 +20,9 @@ Many of us still use Claude (myself) included, as the primary agent/harness. But
 extensively with Roo code/Cline as well. It should work perfectly with opencode as well, although
 I have not tested it
 
-The brain is a continuously learning memory system that intercepts every coding model
+## Overview
+
+Brain is a continuously-learning memory system that intercepts every coding model
 request flowing through the LiteLLM gateway. It builds five kinds of memory —
 code chunks, architectural summaries, problem/solution experiences, curated
 skills, and agent personas — then retrieves relevant context on every subsequent
@@ -48,12 +49,12 @@ request. No per-client setup. Every model sees everything the team has learned.
 ## Why This Exists
 
 Before Brain, every coding session started cold. The model knew nothing about
-our codebase, our conventions, or the problems we'd already solved. We repeated
+our codebase, our conventions, or problems we'd already solved. We repeated
 the same debugging, re-explained the same architecture.
 
 Brain fixes this by making the gateway — the single choke point every model
 request passes through — the learning substrate. Every interaction becomes
-training data. Every solved problem becomes a retrievable context. The system
+training data. Every solved problem becomes retrievable context. The system
 gets smarter with every request, automatically.
 
 With the persona system, Brain now also answers *who* should respond — injecting
@@ -86,6 +87,16 @@ thresholds:
 | MEDIUM | deepseek-v4-flash | Score 0.10–0.22 |
 | COMPLEX | grok-4.3 | Score 0.22–0.42 |
 | REASONING | deepseek-v4-pro | Score > 0.42 |
+
+### Evaluated Models
+
+**Xiaomi MiMo-V2.5** (310B MoE, 15B activated, 1M ctx, MIT license):
+Evaluated 2026-05-07 as a potential COMPLEX-tier replacement. Strong coding
+benchmarks (SWE-bench Pro 56.1, TerminalBench 2 65.8) at $0.40/$2.00 per 1M
+tokens. Beats Grok-4.3 on agentic coding, costs about half of GPT-4o. Not added
+to router pending further evaluation of real-world reliability — early adopter
+reports cite incomplete thinking/reasoning integration with Claude Code clients.
+Available via OpenRouter as `xiaomi/mimo-v2.5` when ready.
 
 The `complex_reasoning` threshold was raised from 0.28 to 0.42 because a
 single `reasoningMarkers` hit (weight 0.30) was routing everyday coding
@@ -160,8 +171,37 @@ keeping, then stores it.
 - Also reads reasoning_content (thinking tokens) so reasoning-heavy models
   aren't excluded
 
+**Quality gates (applied before capture):**
+
+Not every response is worth keeping. Two quality filters prevent low-signal
+interactions from polluting the memory stores:
+
+| Gate | What it rejects | Example triggers |
+|------|----------------|-----------------|
+| Venting filter | User queries with profanity/insults | "you useless cunt", "this is garbage", "you're terrible" |
+| Response noise filter | Model self-corrections, error propagation, hallucination signals | "I apologize, let me correct that", stack traces in output, "as an AI language model" |
+
+The venting filter isn't a profanity ban — it's a signal-quality gate. Users
+who are ranting get worse code from the model because the model is reacting
+to emotion rather than reasoning about the problem. Those interactions aren't
+good training data.
+
+The response noise filter catches the model generating broken code (stack
+traces), correcting its own hallucinations ("I apologize, let me fix that"),
+or hedging so hard the output has no actionable content ("I'm not sure about
+this approach"). These responses are unreliable training data regardless of
+length or formatting.
+
 **Access tracking:** Retrieved entries have `access_count` incremented and
-`last_accessed_at` updated. This feeds recency boosts in future retrievals.
+`last_accessed_at` updated. This feeds recency boosts in future retrievals
+and powers the Tier 3 embedding-based quality tuning.
+
+**Configuration:**
+
+| Env Variable | Default | Purpose |
+|---|---|---|
+| `BRAIN_LEARN_FILTER_VENTING` | `true` | Skip capture/learn when user query contains venting/abusive language |
+| `BRAIN_CAPTURE_FILTER_NOISE` | `true` | Skip capture/learn when response contains self-corrections, errors, or hallucination patterns |
 
 ### 3. Learn Loop (post-call)
 
@@ -169,6 +209,25 @@ Detects problem-solving patterns. When a query contains markers like "error",
 "bug", "fix", "why does", "how do I fix", and the response is substantive, the
 interaction is stored as a `brain_experience` entry — problem, solution, and
 outcome. These are retrievable when similar problems arise.
+
+**Quality gates:** Same venting and response-noise filters as the Capture
+Loop. A rant about broken code doesn't produce learnable problem-solving
+data. A response full of error messages isn't a reliable solution.
+
+**Outcome inference (replaces hardcoded "success"):**
+
+Before this change, every experience was stored with `outcome="success"` —
+the system had no way to know if the fix actually worked. Now `_infer_outcome()`
+classifies based on the model's own response language:
+
+| Outcome | Signal in response | Example |
+|---------|-------------------|---------|
+| `resolved` | Confident closure language | "This should fix the issue, try that." |
+| `uncertain` | Hedging, multiple options without resolution | "One approach might be... another option is..." |
+| `failed` | The model admits it can't solve it | "Unfortunately this doesn't work because..." |
+
+This makes `brain_experience` searchable by outcome quality — a future
+retrieval can weight "resolved" experiences higher than "failed" ones.
 
 ### 4. Skills Loop (batch ingestion)
 
@@ -319,10 +378,91 @@ Directed relationships between memories — who calls whom, what depends on what
 
 | Path | Source | Method | Granularity |
 |------|--------|--------|-------------|
-| Graphify (AST) | Local repositories | Tree-sitter parsing (25 languages) via graphify tool | Per-symbol: functions, classes, edges |
+| Graphify (AST) | Local repositories | Tree-sitter parsing (25 languages) via graphify tool, then 3-tier quality grading | Per-symbol: functions, classes, edges |
 | Session Capture | Model responses (automatic) | Post-call heuristics: code blocks >=10 lines, architectural markers | Per-response: code, summaries, experiences |
 | Skill Ingestion | GitHub SKILL.md repos (6) | YAML frontmatter parsing + embedding | Per-skill: methodology modules |
 | Persona Ingestion | agency-agents repo (183 personas) | YAML frontmatter + section extraction + embedding | Per-persona: identity, rules, style |
+
+## Chunk Quality Grading (Ingestion Filter)
+
+Before Brain stores a code chunk, it runs every chunk through a three-tier
+quality pipeline. This prevents noise (import blocks, license headers, trivial
+getters, near-duplicates) from polluting the vector index and competing with
+genuine signal in retrieval.
+
+The pipeline fires during file ingestion (`brain_ingest.ingest_file()`). Session
+capture (`capture_if_valuable`) already has its own quality heuristics
+(min_code_lines, architectural markers) and skips the grading pipeline to keep
+post-call latency as low as possible.
+
+### Tier 1: Heuristic Scoring (sub-ms, no embedding cost)
+
+`score_chunk()` assigns a 0.0-1.0 quality score to each chunk before embedding.
+Chunks below `BRAIN_CHUNK_MIN_SCORE` (default 0.3) are dropped — they never
+reach the embedding step.
+
+**Start neutral (0.5), then apply:**
+
+| Direction | Signal | Adjustment |
+|-----------|--------|------------|
+| Penalty | >70% import/require/include lines | -0.4 |
+| Penalty | Getter/setter with body ≤3 lines | -0.3 |
+| Penalty | >50% comment lines (license headers, generated code) | -0.3 |
+| Penalty | <5 or >500 lines | -0.2 |
+| Bonus | ≥3 algorithmic lines (for/while/if/return/yield/map/filter) | +0.15 |
+| Bonus | Error handling present (try/catch/raise/panic/Result) | +0.1 |
+| Bonus | Meaningful symbol name (not getX/setY/isX) | +0.1 |
+| Bonus | 10-200 line range | +0.1 |
+
+**Result:** ~15-30% of chunks dropped for a typical Python/TypeScript repo.
+Import blocks, license headers, and trivial property accessors are the main
+casualties.
+
+### Tier 2: Near-Dedup via Embedding (~1ms PGVector lookup per chunk)
+
+After embedding, each chunk is checked against the nearest existing chunk in
+the same repo (`brain_code`, same `repo_path`). If cosine similarity exceeds
+`BRAIN_CHUNK_DEDUP_THRESHOLD` (default 0.95), the new chunk is skipped.
+
+This catches:
+- Copy-pasted utility functions across files
+- Slightly modified versions of the same function (different branches/commits)
+- Re-ingested files that haven't changed
+
+Enabled by default. Set `BRAIN_CHUNK_DEDUP_ENABLED=false` to disable.
+
+### Tier 3: Embedding-Based Quality Tuning (self-tuning over time)
+
+Uses the **existing embedding model** — no LLM calls, no external services.
+The same `find_nearest_code()` lookup from Tier 2 also reads `access_count`
+from the nearest chunk. This answers: "do chunks like this one get retrieved?"
+
+| Nearest neighbor access_count | Effect on threshold |
+|---|---|
+| ≥ `BRAIN_CHUNK_QUALITY_MIN_ACCESS` (default 3) | Lower the bar by 0.10 — similar chunks are proven valuable |
+| 0 (never accessed) | Raise the bar by 0.08 — similar chunks may be noise |
+| 1-2 (some access) | No change — not enough signal yet |
+
+The embedding model provides the similarity judgment (via PGVector cosine
+distance), while `access_count` provides the quality label. Together they form
+a **self-tuning quality classifier** that improves as the system sees what
+chunks get retrieved vs ignored.
+
+Only tunes when the nearest match has similarity ≥ 0.70 — below that, the
+match is too distant to draw conclusions. Tier 3 is opt-in (disabled by
+default) since it requires the system to have accumulated enough access data
+to be meaningful. Enable with `BRAIN_CHUNK_QUALITY_TUNING=true`.
+
+### Configuration Summary
+
+| Env Variable | Default | Purpose |
+|---|---|---|
+| `BRAIN_CHUNK_MIN_SCORE` | `0.3` | Drop chunks below this heuristic score |
+| `BRAIN_CHUNK_DEDUP_ENABLED` | `true` | Enable near-duplicate detection |
+| `BRAIN_CHUNK_DEDUP_THRESHOLD` | `0.95` | Cosine similarity threshold for dedup |
+| `BRAIN_CHUNK_DEDUP_RECENT` | `50` | (Reserved) Max recent chunks to check per repo |
+| `BRAIN_CHUNK_QUALITY_TUNING` | `false` | Enable embedding-based threshold tuning |
+| `BRAIN_CHUNK_QUALITY_MIN_ACCESS` | `3` | Access count threshold for "valuable" chunks |
 
 ### Path Details
 
@@ -471,9 +611,8 @@ to support JWT rotation."
 │                                                                  │
 │ Generates a solution informed by security expertise, our code,   │
 │ our conventions, our past mistakes, and established patterns.    │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
+└──────────────────────────┬──────────────────────────────────────-┘
+                           │                           ▼
 ┌─ Brain Capture ──────────────────────────────────────────────────┐
 │ Response contains new code → stored as brain_code chunks         │
 │ Architectural insight about JWT rotation → stored as summary     │
@@ -499,9 +638,10 @@ loading (background thread) and ~14s if the embedding model was evicted from
 Ollama memory. Both gracefully degrade — the request proceeds without context
 rather than blocking.
 
-**Current state (2026-05-06):** 461 code chunks, 403 summaries, 0 experiences,
+**Current state (2026-05-07):** 461 code chunks, 403 summaries, 0 experiences,
 24 skills from 6 repos, 183 personas from 1 repo, 351 graph edges. Growing with
-every coding request.
+every coding request. Experiences at 0 because the learn loop waited for quality
+filters — now deployed, the count will climb with real problem-solving data.
 
 ## Key Design Decisions
 
@@ -572,6 +712,32 @@ every coding request.
     search. The threshold prevents false matches from coincidental single-word
     overlaps.
 
+14. **Three-tier chunk quality grading at ingestion.** Bulk file ingestion
+    (Graphify, auto-ingest) produces noise — import blocks, license headers,
+    trivial getters, near-duplicates. Three increasingly expensive filters
+    remove that noise before it reaches the vector index. Tier 1 (heuristic
+    scoring) is sub-millisecond and drops the worst offenders before embedding
+    cost is incurred. Tier 2 (near-dedup) uses the embedding model to catch
+    copy-pasted and re-ingested code. Tier 3 (quality tuning) uses access_count
+    from the same PGVector lookup to self-tune thresholds over time — the
+    embedding model learns what chunks are actually retrieved and adjusts the
+    bar accordingly. Session capture skips this pipeline (it has its own
+    content-based filters and must remain fast).
+
+15. **Interaction quality filters prevent bad training data.** The proxy is
+    a black box — it can't see whether the user accepted a fix or whether tests
+    passed. But it CAN read the user query and model response. Two lightweight
+    keyword gates (venting filter, response noise filter) run on every capture
+    and learn event. They reject interactions where the user is ranting (model
+    produces worse code when reacting to emotion), the model is correcting its
+    own hallucination ("I apologize, let me fix that"), the response contains
+    error messages (the model generated broken code), or the output hedges so
+    hard it has no actionable content. These aren't politeness filters — they're
+    training-data quality gates. Outcome inference replaces the hardcoded
+    `"success"` label with `resolved`/`uncertain`/`failed` heuristics drawn from
+    the model's own closing language, making experiences searchable by likely
+    quality.
+
 ## Recreating This System
 
 ### Prerequisites
@@ -607,8 +773,12 @@ export OLLAMA_KEEP_ALIVE=24h
 ### 3. Python Dependencies
 
 ```bash
-pip install asyncpg httpx sentence-transformers pyyaml
+pip install litellm asyncpg httpx sentence-transformers pyyaml RestrictedPython
 ```
+
+> Tested with LiteLLM 1.83.14. The `RestrictedPython` dependency was
+> introduced in v1.83.14 for SSRF/auth hardening. If deploying on an older
+> LiteLLM, omit it and check the release notes for security patches.
 
 sentence-transformers provides the CrossEncoder reranker
 (`cross-encoder/ms-marco-MiniLM-L-6-v2`). It loads lazily in a background
